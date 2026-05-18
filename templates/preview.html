@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ name }} — Ön baxış</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="container wide">
+    <header class="page-header">
+      <div class="crumbs">
+        <a href="{{ url_for('results', upload_id=upload_id) }}">← Sığortalar siyahısına qayıt</a>
+      </div>
+      <h1>{{ name }}</h1>
+      <p class="muted">
+        <strong>{{ "{:,}".format(total) }}</strong> sətir
+        {% if truncated %}· ilk <strong>{{ "{:,}".format(shown) }}</strong> göstərilir{% endif %}
+      </p>
+      <div class="page-actions">
+        <a class="btn primary" href="{{ url_for('download_one', upload_id=upload_id, name=name) }}">.xlsx faylını yüklə</a>
+      </div>
+    </header>
+
+    {% if truncated %}
+      <div class="status info">
+        Sürət üçün ön baxış məhdudlaşdırılıb. Yüklənən fayl bütün <strong>{{ "{:,}".format(total) }}</strong> sətri ehtiva edir.
+      </div>
+    {% endif %}
+
+    <section class="table-wrap">
+      <table class="grid preview-grid">
+        <thead>
+          <tr>
+            {% for h in headers %}<th>{{ h }}</th>{% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              {% for cell in row %}<td>{{ cell }}</td>{% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

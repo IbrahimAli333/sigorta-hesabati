@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="az">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sığortalar — {{ filename }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="container">
+    <header class="page-header">
+      <div class="crumbs">
+        <a href="{{ url_for('index') }}">← Yeni yükləmə</a>
+      </div>
+      <h1>Tapılan sığortalar</h1>
+      <p class="muted">
+        Fayl: <strong>{{ filename }}</strong> ·
+        <strong>{{ total_groups }}</strong> sığorta ·
+        <strong>{{ "{:,}".format(total_rows) }}</strong> ümumi sətir
+      </p>
+    </header>
+
+    <section class="toolbar">
+      <input id="filter" type="search" placeholder="Sığortaları filtrlə…" autocomplete="off">
+      <div class="toolbar-actions">
+        <a class="btn primary" href="{{ url_for('download_all', upload_id=upload_id) }}">Hamısını yüklə (.zip)</a>
+      </div>
+    </section>
+
+    <section class="list-card">
+      <table class="grid" id="ins-table">
+        <thead>
+          <tr>
+            <th>Müəssisə</th>
+            <th class="num">Sətir sayı</th>
+            <th class="actions-col">Əməliyyatlar</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+            <tr>
+              <td class="ins-name">
+                <a href="{{ url_for('preview', upload_id=upload_id, name=item.name) }}">{{ item.name }}</a>
+              </td>
+              <td class="num">{{ "{:,}".format(item.rows) }}</td>
+              <td class="actions-col">
+                <a class="btn small" href="{{ url_for('preview', upload_id=upload_id, name=item.name) }}">Ön baxış</a>
+                <a class="btn small primary" href="{{ url_for('download_one', upload_id=upload_id, name=item.name) }}">Yüklə</a>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    const filter = document.getElementById('filter');
+    const rows = document.querySelectorAll('#ins-table tbody tr');
+    filter.addEventListener('input', () => {
+      const q = filter.value.trim().toLowerCase();
+      rows.forEach(r => {
+        const name = r.querySelector('.ins-name').innerText.toLowerCase();
+        r.style.display = name.includes(q) ? '' : 'none';
+      });
+    });
+  </script>
+</body>
+</html>
