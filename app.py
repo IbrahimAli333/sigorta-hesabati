@@ -99,6 +99,18 @@ def _read_and_group(file_storage) -> tuple[dict[str, pd.DataFrame], dict[str, st
     group_col = pos_to_name[GROUP_COL_IDX]
     keep_col_names = [pos_to_name[p] for p in KEEP_COL_POSITIONS]
 
+    # Always rebuild "Tam adi" (col H) from Soyadı + Adı + Baba Adı so the
+    # output is consistent even when the source column is blank or out of date.
+    soyadi = pos_to_name[4]    # E
+    adi = pos_to_name[5]       # F
+    baba = pos_to_name[6]      # G
+    tam_adi = pos_to_name[7]   # H
+    df[tam_adi] = (
+        df[soyadi].fillna("").astype(str).str.strip()
+        + " " + df[adi].fillna("").astype(str).str.strip()
+        + " " + df[baba].fillna("").astype(str).str.strip()
+    ).str.replace(r"\s+", " ", regex=True).str.strip()
+
     # Classify each kept column by its source position so the format helpers
     # know what to do without relying on the (preserved) header text.
     col_types: dict[str, str] = {}
