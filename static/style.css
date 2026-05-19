@@ -142,7 +142,81 @@ code { background: #eef0f6; padding: 1px 6px; border-radius: 4px; font-size: .92
   padding: 0 6px;
   margin-right: 6px;
   font-weight: 600;
+  text-align: center;
 }
+.card-note { margin: 10px 0 0; font-size: 13px; }
+.card ul.cols li.dim { opacity: .55; }
+.card ul.cols li.dim b { background: #ececec; color: var(--muted); }
+.card ul.cols li.extra b { background: #d6e7ff; color: #1a3d99; }
+
+/* Two side-by-side dropzones (used inside Step 2) */
+.dropzone-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+@media (max-width: 720px) {
+  .dropzone-grid { grid-template-columns: 1fr; }
+}
+.dropzone-grid .dropzone { padding: 28px 16px; }
+
+/* Workflow sections (Step 1 / Step 2) */
+.workflow-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 22px 18px;
+  margin-top: 22px;
+  box-shadow: var(--shadow);
+}
+.workflow-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.workflow-head h2 { margin: 0 0 4px; font-size: 19px; letter-spacing: -.01em; }
+.workflow-head p { margin: 0; }
+.step-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+}
+.cols-details {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+.cols-details summary {
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--muted);
+  user-select: none;
+}
+.cols-details summary:hover { color: var(--text); }
+.cols-details .cols { margin-top: 12px; padding-left: 18px; color: var(--muted); }
+.cols-details .cols li { margin: 3px 0; }
+.cols-details .cols li b {
+  display: inline-block;
+  min-width: 28px;
+  color: var(--text);
+  background: var(--yellow);
+  border-radius: 4px;
+  padding: 0 6px;
+  margin-right: 6px;
+  font-weight: 600;
+  text-align: center;
+}
+.cols-details .cols li.dim { opacity: .55; }
+.cols-details .cols li.dim b { background: #ececec; color: var(--muted); }
 
 /* Toolbar on results page */
 .toolbar {

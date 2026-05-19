@@ -1,7 +1,7 @@
 """Sığorta Hesabatı Generatoru — Flask web app.
 
 Upload a hospital services .xlsx, group rows by column N (Müəssisə), and
-download per-insurance reports containing only the yellow columns.
+download per-insurance reports containing only the chosen output columns.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from datetime import datetime, date
 from threading import Lock
 
 import pandas as pd
+from rapidfuzz import fuzz, process
 from flask import (
     Flask,
     Response,
@@ -26,8 +27,9 @@ from flask import (
     url_for,
 )
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -51,30 +53,95 @@ def _require_password():
         {"WWW-Authenticate": 'Basic realm="Sigorta Hesabati"'},
     )
 
-# Source-column positions (0-indexed) we keep in the output, in display order.
-# We never rename these — the source file's headers are preserved verbatim.
-KEEP_COL_POSITIONS = [
-    0,   # A  Xidmət tarixi
-    3,   # D  Protokol No
-    4,   # E  Soyadı
-    5,   # F  Adı
-    6,   # G  Baba Adı
-    7,   # H  Tam adi
-    12,  # M  Doğum Tarixi
-    32,  # AG Xidmət adı
-    34,  # AI Ədəd
-    40,  # AO Kdvli Hasta Tutar
-]
-GROUP_COL_IDX = 13  # column N: Müəssisə
-ALL_COL_IDX = sorted({*KEEP_COL_POSITIONS, GROUP_COL_IDX})
 
-# Column-type classification by source position (not header label, so we can
-# preserve headers exactly as they appear in the source file).
+# ----------------------- Column configuration -----------------------
+#
+# We read more columns from the source than we emit. E (Soyadı), F (Adı) and
+# G (Baba Adı) are read so we can build "Tam adi" ourselves and so we can sort
+# by Adı; they do NOT appear in the output.
+#
+# Source column positions (0-indexed):
+GROUP_COL_IDX = 13   # N  Müəssisə (grouping key)
+
+READ_COL_POSITIONS = [
+    0,   # A  Xidmət tarixi      (output, sort key)
+    3,   # D  Protokol No        (output)
+    4,   # E  Soyadı             (input only — for computed Tam adi)
+    5,   # F  Adı                (input only — for computed Tam adi + sort)
+    6,   # G  Baba Adı           (input only — for computed Tam adi)
+    12,  # M  Doğum Tarixi       (output)
+    GROUP_COL_IDX,
+    32,  # AG Xidmət adı         (output)
+    34,  # AI Ədəd               (output)
+    40,  # AO Kdvli Hasta Tutar  (output)
+]
+READ_COL_POSITIONS = sorted(set(READ_COL_POSITIONS))
+
+# Source positions that appear in the output, in display order.
+# E (4), F (5), G (6) are emitted but marked HIDDEN in Excel — users can right-click
+# and "Unhide" if they want to inspect the source components of Tam adi.
+OUTPUT_SOURCE_POSITIONS = [0, 3, 4, 5, 6, 12, 32, 34, 40]
+HIDDEN_SOURCE_POSITIONS = {4, 5, 6}
+
+# Computed "Tam adi" column. Inserted in the output right after Baba Adı (6)
+# so the hidden source components sit immediately to its left.
+TAM_ADI_LABEL = "Tam adi"
+TAM_ADI_INSERT_AFTER = 6
+
+# Type classification by source position.
 DATE_COL_POSITIONS = {0, 12}     # Xidmət tarixi, Doğum Tarixi
 MONEY_COL_POSITIONS = {40}        # Kdvli Hasta Tutar
 QTY_COL_POSITIONS = {34}          # Ədəd
 
 UNKNOWN_LABEL = "Bilinmir"  # used when Müəssisə is empty/NaN
+
+# Price-list matching configuration.
+# File 2 (price list) shape:
+#   - Header row at row 4 (1-indexed) → pandas header=3
+#   - Data starts at row 5
+#   - Column D (index 3) = service name to match against
+#   - Column E (index 4) = price to copy into the output
+PRICE_LIST_HEADER_ROW = 3            # 0-indexed
+PRICE_LIST_NAME_COL_IDX = 3          # column D
+PRICE_LIST_PRICE_COL_IDX = 4         # column E
+MATCH_THRESHOLD = 70.0               # rapidfuzz score >= 70 counts as a match
+MATCHED_NAME_LABEL = "Xidmətin adı (sığorta)"
+MATCHED_PRICE_LABEL = "Qiymət"
+
+
+# ----------------------- Azerbaijani alphabet sort -----------------------
+
+AZ_LETTERS = [
+    ("A", "a"), ("B", "b"), ("C", "c"), ("Ç", "ç"), ("D", "d"), ("E", "e"),
+    ("Ə", "ə"), ("F", "f"), ("G", "g"), ("Ğ", "ğ"), ("H", "h"), ("X", "x"),
+    ("I", "ı"), ("İ", "i"), ("J", "j"), ("K", "k"), ("Q", "q"), ("L", "l"),
+    ("M", "m"), ("N", "n"), ("O", "o"), ("Ö", "ö"), ("P", "p"), ("R", "r"),
+    ("S", "s"), ("Ş", "ş"), ("T", "t"), ("U", "u"), ("Ü", "ü"), ("V", "v"),
+    ("Y", "y"), ("Z", "z"),
+]
+
+_AZ_RANK: dict[str, int] = {}
+for _i, (_u, _l) in enumerate(AZ_LETTERS):
+    _AZ_RANK[_u] = _i
+    _AZ_RANK[_l] = _i
+
+
+def _az_sort_key(s: str) -> str:
+    """Map a string to a comparable key string that sorts by the Azerbaijani alphabet."""
+    if not s:
+        return ""
+    parts = []
+    for ch in s:
+        rank = _AZ_RANK.get(ch)
+        if rank is None:
+            # Non-alphabet chars (spaces, digits, punctuation, foreign letters)
+            # sort after all alphabet chars; preserve their relative order.
+            rank = 100 + (ord(ch) & 0x3FF)
+        parts.append(f"{rank:04x}")
+    return "".join(parts)
+
+
+# ----------------------- Storage -----------------------
 
 # In-memory store keyed by upload id:
 #   {upload_id: {"filename": str, "groups": {name: DataFrame},
@@ -84,60 +151,7 @@ STORE: dict[str, dict] = {}
 STORE_LOCK = Lock()
 
 
-# ---------- helpers ----------
-
-
-def _read_and_group(file_storage) -> tuple[dict[str, pd.DataFrame], dict[str, str]]:
-    """Read the uploaded xlsx and return (groups, col_types).
-
-    Source-file column headers are preserved verbatim.
-    """
-    df = pd.read_excel(file_storage, usecols=ALL_COL_IDX, engine="openpyxl")
-
-    # Map source positions -> the header pandas read for that column.
-    pos_to_name: dict[int, str] = {idx: df.columns[i] for i, idx in enumerate(ALL_COL_IDX)}
-    group_col = pos_to_name[GROUP_COL_IDX]
-    keep_col_names = [pos_to_name[p] for p in KEEP_COL_POSITIONS]
-
-    # Always rebuild "Tam adi" (col H) from Soyadı + Adı + Baba Adı so the
-    # output is consistent even when the source column is blank or out of date.
-    soyadi = pos_to_name[4]    # E
-    adi = pos_to_name[5]       # F
-    baba = pos_to_name[6]      # G
-    tam_adi = pos_to_name[7]   # H
-    df[tam_adi] = (
-        df[soyadi].fillna("").astype(str).str.strip()
-        + " " + df[adi].fillna("").astype(str).str.strip()
-        + " " + df[baba].fillna("").astype(str).str.strip()
-    ).str.replace(r"\s+", " ", regex=True).str.strip()
-
-    # Classify each kept column by its source position so the format helpers
-    # know what to do without relying on the (preserved) header text.
-    col_types: dict[str, str] = {}
-    for pos in KEEP_COL_POSITIONS:
-        name = pos_to_name[pos]
-        if pos in DATE_COL_POSITIONS:
-            col_types[name] = "date"
-        elif pos in MONEY_COL_POSITIONS:
-            col_types[name] = "money"
-        elif pos in QTY_COL_POSITIONS:
-            col_types[name] = "qty"
-        else:
-            col_types[name] = "text"
-
-    groups: dict[str, pd.DataFrame] = {}
-    for name, sub in df.groupby(group_col, dropna=False, sort=True):
-        if pd.isna(name) or str(name).strip() == "":
-            key = UNKNOWN_LABEL
-        else:
-            key = str(name).strip()
-        sub = sub[keep_col_names].reset_index(drop=True)
-        if key in groups:
-            groups[key] = pd.concat([groups[key], sub], ignore_index=True)
-        else:
-            groups[key] = sub
-    return groups, col_types
-
+# ----------------------- Date parsing -----------------------
 
 _DATE_PATTERNS = [
     "%Y-%m-%d %H:%M:%S.%f",
@@ -146,6 +160,7 @@ _DATE_PATTERNS = [
     "%d/%m/%Y %H:%M:%S",
     "%d/%m/%Y",
     "%d.%m.%Y",
+    "%d-%m-%Y",
 ]
 
 
@@ -161,6 +176,267 @@ def _try_parse_date(s: str):
     return None
 
 
+def _normalize_to_datetime(v):
+    """Coerce a value to a pandas Timestamp (or NaT) for sorting/formatting."""
+    if v is None:
+        return pd.NaT
+    if isinstance(v, float) and pd.isna(v):
+        return pd.NaT
+    if isinstance(v, pd.Timestamp):
+        return v
+    if isinstance(v, datetime):
+        return pd.Timestamp(v)
+    if isinstance(v, date):
+        return pd.Timestamp(v)
+    if isinstance(v, str):
+        parsed = _try_parse_date(v)
+        if parsed is not None:
+            return pd.Timestamp(parsed)
+        return pd.NaT
+    return pd.NaT
+
+
+# ----------------------- Price-list parsing & fuzzy matching -----------------------
+
+
+def _normalize_service_name(s) -> str:
+    """Strip whitespace/newlines, collapse internal whitespace, casefold."""
+    if s is None:
+        return ""
+    if isinstance(s, float) and pd.isna(s):
+        return ""
+    s = str(s).strip()
+    if not s:
+        return ""
+    s = re.sub(r"\s+", " ", s)
+    return s.casefold()
+
+
+def _parse_price_list(file_storage):
+    """Parse the price list. Returns (normalized_names, raw_names, prices) lists.
+
+    Layout: header at row 4 (1-indexed), data from row 5. We read columns D + E
+    only. Names are kept verbatim (for display) plus a normalized copy (for
+    matching). Empty rows are dropped.
+    """
+    df = pd.read_excel(
+        file_storage,
+        header=PRICE_LIST_HEADER_ROW,
+        usecols=[PRICE_LIST_NAME_COL_IDX, PRICE_LIST_PRICE_COL_IDX],
+        engine="openpyxl",
+    )
+    name_col = df.columns[0]
+    price_col = df.columns[1]
+
+    names_norm: list[str] = []
+    names_raw: list[str] = []
+    prices: list = []
+    for raw_name, raw_price in zip(df[name_col].tolist(), df[price_col].tolist()):
+        norm = _normalize_service_name(raw_name)
+        if not norm:
+            continue
+        names_norm.append(norm)
+        names_raw.append(str(raw_name).strip())
+        prices.append(raw_price)
+    return names_norm, names_raw, prices
+
+
+def _match_services(
+    service_values: list,
+    price_list: tuple[list[str], list[str], list],
+    threshold: float = MATCH_THRESHOLD,
+) -> dict[str, tuple[str, object]]:
+    """For each unique service name, find the best fuzzy match above threshold.
+
+    Returns {original_service_name: (matched_raw_name, matched_price)}. Names
+    with no match (or empty) are absent from the dict.
+    """
+    names_norm, names_raw, prices = price_list
+    if not names_norm:
+        return {}
+
+    seen = set()
+    unique: list = []
+    for v in service_values:
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
+        if v in seen:
+            continue
+        seen.add(v)
+        unique.append(v)
+
+    match_map: dict[str, tuple[str, object]] = {}
+    for src in unique:
+        src_norm = _normalize_service_name(src)
+        if not src_norm:
+            continue
+        result = process.extractOne(
+            src_norm,
+            names_norm,
+            scorer=fuzz.ratio,
+            score_cutoff=threshold,
+        )
+        if result is None:
+            continue
+        _, _, idx = result
+        match_map[src] = (names_raw[idx], prices[idx])
+    return match_map
+
+
+# ----------------------- Match-existing-file flow (box 2) -----------------------
+
+
+# Header names we recognize inside an existing (already-split) insurance file.
+# Matching is case-insensitive and whitespace-tolerant.
+_SERVICE_HEADER = "xidmət adı"
+_HIDDEN_HEADER_NAMES = {"soyadı", "adı", "baba adı"}
+_DATE_HEADER_NAMES = {"xidmət tarixi", "doğum tarixi"}
+_MONEY_HEADER_NAMES = {"kdvli hasta tutar", "qiymət"}
+_QTY_HEADER_NAMES = {"ədəd"}
+
+
+def _norm_header(h) -> str:
+    if h is None:
+        return ""
+    return re.sub(r"\s+", " ", str(h)).strip().casefold()
+
+
+def _match_existing_file(insurance_storage, pricelist_storage) -> tuple[bytes, str]:
+    """Take an already-split insurance .xlsx + a price list, return new .xlsx
+    bytes (and a suggested download name) with two new columns appended:
+    "Xidmətin adı (sığorta)" and "Qiymət".
+    """
+    df = pd.read_excel(insurance_storage, engine="openpyxl")
+
+    # Find the Xidmət adı column by header name.
+    service_col = None
+    for col in df.columns:
+        if _norm_header(col) == _SERVICE_HEADER:
+            service_col = col
+            break
+    if service_col is None:
+        raise ValueError(
+            "'Xidmət adı' sütunu bu faylda tapılmadı. Zəhmət olmasa "
+            "1-ci addımın çıxış faylını yükləyin."
+        )
+
+    price_list = _parse_price_list(pricelist_storage)
+    match_map = _match_services(df[service_col].tolist(), price_list)
+
+    df[MATCHED_NAME_LABEL] = df[service_col].map(
+        lambda v: match_map.get(v, (None, None))[0]
+    )
+    df[MATCHED_PRICE_LABEL] = df[service_col].map(
+        lambda v: match_map.get(v, (None, None))[1]
+    )
+
+    # Classify each column for formatting + figure out which to hide.
+    col_types: dict[str, str] = {}
+    hidden_cols: set[str] = set()
+    for col in df.columns:
+        n = _norm_header(col)
+        if n in _DATE_HEADER_NAMES:
+            col_types[col] = "date"
+        elif n in _MONEY_HEADER_NAMES:
+            col_types[col] = "money"
+        elif n in _QTY_HEADER_NAMES:
+            col_types[col] = "qty"
+        else:
+            col_types[col] = "text"
+        if n in _HIDDEN_HEADER_NAMES:
+            hidden_cols.add(col)
+
+    data = _df_to_xlsx_bytes(df, col_types, hidden_cols, sheet_name="Hesabat")
+    return data
+
+
+# ----------------------- Core: read, sort, group -----------------------
+
+
+def _read_and_group(
+    file_storage,
+) -> tuple[dict[str, pd.DataFrame], dict[str, str], set[str]]:
+    """Read the uploaded xlsx, sort, group by Müəssisə.
+
+    Returns (groups, col_types, hidden_cols). Output columns include the source
+    Soyadı/Adı/Baba Adı (hidden in Excel) plus a computed visible "Tam adi".
+    Price-list matching is a separate flow — see /match.
+    """
+    df = pd.read_excel(file_storage, usecols=READ_COL_POSITIONS, engine="openpyxl")
+
+    pos_to_name: dict[int, str] = {idx: df.columns[i] for i, idx in enumerate(READ_COL_POSITIONS)}
+    date_col = pos_to_name[0]
+    dob_col = pos_to_name[12]
+    soyadi_col = pos_to_name[4]
+    adi_col = pos_to_name[5]
+    baba_col = pos_to_name[6]
+    group_col = pos_to_name[GROUP_COL_IDX]
+
+    # Build computed Tam adi = Soyadı + Adı + Baba Adı (vectorized).
+    df[TAM_ADI_LABEL] = (
+        df[soyadi_col].fillna("").astype(str).str.strip()
+        + " " + df[adi_col].fillna("").astype(str).str.strip()
+        + " " + df[baba_col].fillna("").astype(str).str.strip()
+    ).str.replace(r"\s+", " ", regex=True).str.strip()
+
+    # Normalize date columns so sorting / writing have real datetimes.
+    df[date_col] = df[date_col].apply(_normalize_to_datetime)
+    df[dob_col] = df[dob_col].apply(_normalize_to_datetime)
+
+    # Sort: primary Xidmət tarixi ascending (oldest first),
+    #       secondary Adı ascending using Azerbaijani alphabet.
+    df["_az_sort_key"] = df[adi_col].fillna("").astype(str).map(_az_sort_key)
+    df = df.sort_values(
+        by=[date_col, "_az_sort_key"],
+        ascending=[True, True],
+        na_position="last",
+        kind="mergesort",  # stable
+    ).reset_index(drop=True)
+    df = df.drop(columns=["_az_sort_key"])
+
+    # Build output column list in display order. E/F/G appear right before Tam adi.
+    output_cols: list[str] = []
+    hidden_cols: set[str] = set()
+    for pos in OUTPUT_SOURCE_POSITIONS:
+        name = pos_to_name[pos]
+        output_cols.append(name)
+        if pos in HIDDEN_SOURCE_POSITIONS:
+            hidden_cols.add(name)
+        if pos == TAM_ADI_INSERT_AFTER:
+            output_cols.append(TAM_ADI_LABEL)
+
+    # Type classification keyed by the actual header name in the source.
+    col_types: dict[str, str] = {}
+    for pos in OUTPUT_SOURCE_POSITIONS:
+        name = pos_to_name[pos]
+        if pos in DATE_COL_POSITIONS:
+            col_types[name] = "date"
+        elif pos in MONEY_COL_POSITIONS:
+            col_types[name] = "money"
+        elif pos in QTY_COL_POSITIONS:
+            col_types[name] = "qty"
+        else:
+            col_types[name] = "text"
+    col_types[TAM_ADI_LABEL] = "text"
+
+    # Group by Müəssisə.
+    groups: dict[str, pd.DataFrame] = {}
+    for name, sub in df.groupby(group_col, dropna=False, sort=True):
+        if pd.isna(name) or str(name).strip() == "":
+            key = UNKNOWN_LABEL
+        else:
+            key = str(name).strip()
+        sub = sub[output_cols].reset_index(drop=True)
+        if key in groups:
+            groups[key] = pd.concat([groups[key], sub], ignore_index=True)
+        else:
+            groups[key] = sub
+    return groups, col_types, hidden_cols
+
+
+# ----------------------- Display formatting (HTML preview) -----------------------
+
+
 def _fmt_cell(col_type: str, val) -> str:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return ""
@@ -168,7 +444,7 @@ def _fmt_cell(col_type: str, val) -> str:
         return ""
     if col_type == "date":
         if isinstance(val, (pd.Timestamp, datetime, date)):
-            return val.strftime("%Y-%m-%d")
+            return val.strftime("%d.%m.%Y")
         s = str(val).strip()
         if " " in s and re.match(r"^\d{4}-\d{2}-\d{2}", s):
             s = s.split(" ", 1)[0]
@@ -187,27 +463,46 @@ def _fmt_cell(col_type: str, val) -> str:
     return str(val)
 
 
-def _df_to_xlsx_bytes(df: pd.DataFrame, col_types: dict[str, str], sheet_name: str = "Sheet1") -> bytes:
+# ----------------------- Excel writing -----------------------
+
+
+def _df_to_xlsx_bytes(
+    df: pd.DataFrame,
+    col_types: dict[str, str],
+    hidden_cols: set[str] | None = None,
+    sheet_name: str = "Sheet1",
+) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = _safe_sheet_name(sheet_name, set())
-    _write_df_to_sheet(ws, df, col_types)
+    _write_df_to_sheet(ws, df, col_types, hidden_cols or set())
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def _write_df_to_sheet(ws, df: pd.DataFrame, col_types: dict[str, str]) -> None:
+# Excel table style options:
+#   TableStyleLight* (subtle), TableStyleMedium* (default-ish), TableStyleDark*
+# "TableStyleMedium2" gives a clean yellow/gold accent + banded rows + filter buttons.
+_TABLE_STYLE = "TableStyleMedium2"
+
+# Border for non-table fallback (currently every output uses a Table, so this
+# is just defensive in case `add_table` ever fails).
+_THIN = Side(border_style="thin", color="BFBFBF")
+_CELL_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+
+
+def _write_df_to_sheet(
+    ws,
+    df: pd.DataFrame,
+    col_types: dict[str, str],
+    hidden_cols: set[str] | None = None,
+) -> None:
+    hidden_cols = hidden_cols or set()
     headers = list(df.columns)
     ws.append(headers)
-    header_font = Font(bold=True, color="000000")
-    header_fill = PatternFill("solid", fgColor="FFF2A8")  # soft yellow
-    for col_idx, _ in enumerate(headers, start=1):
-        c = ws.cell(row=1, column=col_idx)
-        c.font = header_font
-        c.fill = header_fill
-        c.alignment = Alignment(horizontal="center", vertical="center")
 
+    # Write data rows.
     for row in df.itertuples(index=False, name=None):
         out = []
         for col_name, val in zip(headers, row):
@@ -226,9 +521,13 @@ def _write_df_to_sheet(ws, df: pd.DataFrame, col_types: dict[str, str]) -> None:
                 out.append(val)
         ws.append(out)
 
-    money_fmt = "#,##0.00"
-    date_fmt = "yyyy-mm-dd"
     n_rows = ws.max_row
+    n_cols = len(headers)
+    last_col_letter = get_column_letter(n_cols)
+
+    # Number formats per column type.
+    money_fmt = "#,##0.00"
+    date_fmt = "dd.mm.yyyy"
     for col_idx, name in enumerate(headers, start=1):
         ctype = col_types.get(name, "text")
         if ctype == "date":
@@ -237,18 +536,54 @@ def _write_df_to_sheet(ws, df: pd.DataFrame, col_types: dict[str, str]) -> None:
         elif ctype == "money":
             for r in range(2, n_rows + 1):
                 ws.cell(row=r, column=col_idx).number_format = money_fmt
+        elif ctype == "qty":
+            for r in range(2, n_rows + 1):
+                ws.cell(row=r, column=col_idx).number_format = "0"
 
-    # Auto-fit-ish column widths (sample first 200 rows; cap to keep sane).
+    # Alignment for header row (the Table style will handle colors/borders).
+    for col_idx in range(1, n_cols + 1):
+        c = ws.cell(row=1, column=col_idx)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Auto-fit-ish column widths (sample up to first 200 rows; cap to keep sane).
     for col_idx, name in enumerate(headers, start=1):
         max_len = len(str(name))
         for r in range(2, min(n_rows, 201) + 1):
             v = ws.cell(row=r, column=col_idx).value
             if v is None:
                 continue
-            s = v.strftime("%Y-%m-%d") if isinstance(v, (datetime, date)) else str(v)
+            if isinstance(v, (datetime, date)):
+                s = v.strftime("%d.%m.%Y")
+            else:
+                s = str(v)
             if len(s) > max_len:
                 max_len = len(s)
         ws.column_dimensions[get_column_letter(col_idx)].width = min(max(max_len + 2, 10), 45)
+
+    # Hide source-name columns (E/F/G equivalents). The data is still there;
+    # users can right-click and "Unhide" if they need to see the components.
+    for col_idx, name in enumerate(headers, start=1):
+        if name in hidden_cols:
+            ws.column_dimensions[get_column_letter(col_idx)].hidden = True
+
+    # Apply Excel "Format as Table" — gives borders, banded rows, filter dropdowns.
+    if n_rows >= 2:  # need at least 1 data row for a valid table range
+        table_ref = f"A1:{last_col_letter}{n_rows}"
+        try:
+            tab = Table(displayName="Hesabat", ref=table_ref)
+            tab.tableStyleInfo = TableStyleInfo(
+                name=_TABLE_STYLE,
+                showFirstColumn=False,
+                showLastColumn=False,
+                showRowStripes=True,
+                showColumnStripes=False,
+            )
+            ws.add_table(tab)
+        except Exception:
+            # Fallback: at least draw plain borders so the output still has lines.
+            for r in range(1, n_rows + 1):
+                for c in range(1, n_cols + 1):
+                    ws.cell(row=r, column=c).border = _CELL_BORDER
 
     ws.freeze_panes = "A2"
 
@@ -279,7 +614,7 @@ def _get_upload(upload_id: str) -> dict:
     return rec
 
 
-# ---------- routes ----------
+# ----------------------- Routes -----------------------
 
 
 @app.route("/")
@@ -297,7 +632,7 @@ def upload():
         return jsonify({"error": "Zəhmət olmasa .xlsx faylı yükləyin"}), 400
 
     try:
-        groups, col_types = _read_and_group(f)
+        groups, col_types, hidden_cols = _read_and_group(f)
     except Exception as e:
         return jsonify({"error": f"Fayl oxuna bilmədi: {e}"}), 400
 
@@ -307,6 +642,7 @@ def upload():
             "filename": fname,
             "groups": groups,
             "col_types": col_types,
+            "hidden_cols": hidden_cols,
             "created": datetime.utcnow(),
         }
 
@@ -342,20 +678,23 @@ def preview(upload_id, name):
     if name not in groups:
         abort(404, description=f"'{name}' sığortası tapılmadı.")
     df = groups[name]
-    headers = list(df.columns)
+    all_headers = list(df.columns)
+    hidden_cols = rec.get("hidden_cols") or set()
+    visible_idx = [i for i, h in enumerate(all_headers) if h not in hidden_cols]
+    visible_headers = [all_headers[i] for i in visible_idx]
 
     max_preview = 2000
     total = len(df)
     shown = min(total, max_preview)
     rows = []
     for tup in df.head(shown).itertuples(index=False, name=None):
-        rows.append([_fmt_cell(col_types.get(headers[i], "text"), v) for i, v in enumerate(tup)])
+        rows.append([_fmt_cell(col_types.get(all_headers[i], "text"), tup[i]) for i in visible_idx])
 
     return render_template(
         "preview.html",
         upload_id=upload_id,
         name=name,
-        headers=headers,
+        headers=visible_headers,
         rows=rows,
         total=total,
         shown=shown,
@@ -369,7 +708,7 @@ def download_one(upload_id, name):
     groups = rec["groups"]
     if name not in groups:
         abort(404)
-    data = _df_to_xlsx_bytes(groups[name], rec["col_types"], sheet_name=name)
+    data = _df_to_xlsx_bytes(groups[name], rec["col_types"], rec.get("hidden_cols"), sheet_name=name)
     fname = f"{_safe_filename(name)}.xlsx"
     return send_file(
         io.BytesIO(data),
@@ -385,6 +724,7 @@ def download_all(upload_id):
     rec = _get_upload(upload_id)
     groups = rec["groups"]
     col_types = rec["col_types"]
+    hidden_cols = rec.get("hidden_cols")
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -397,13 +737,44 @@ def download_all(upload_id):
                 arc = f"{base}_{k}.xlsx"
                 k += 1
             used_names.add(arc)
-            zf.writestr(arc, _df_to_xlsx_bytes(df, col_types, sheet_name=name))
+            zf.writestr(arc, _df_to_xlsx_bytes(df, col_types, hidden_cols, sheet_name=name))
     buf.seek(0)
     return send_file(
         buf,
         mimetype="application/zip",
         as_attachment=True,
         download_name="sigorta_hesabatlari.zip",
+    )
+
+
+@app.route("/match", methods=["POST"])
+def match():
+    """Box 2: take an already-split insurance .xlsx + a price list, return a
+    new .xlsx (direct download) with matched columns appended.
+    """
+    ins = request.files.get("insurance_file")
+    pl = request.files.get("pricelist")
+    if not ins or not ins.filename:
+        return jsonify({"error": "Sığorta faylı təqdim edilmədi"}), 400
+    if not pl or not pl.filename:
+        return jsonify({"error": "Qiymət cədvəli təqdim edilmədi"}), 400
+    if not ins.filename.lower().endswith(".xlsx"):
+        return jsonify({"error": "Sığorta faylı .xlsx formatında olmalıdır"}), 400
+    if not pl.filename.lower().endswith(".xlsx"):
+        return jsonify({"error": "Qiymət cədvəli .xlsx formatında olmalıdır"}), 400
+
+    try:
+        data = _match_existing_file(ins, pl)
+    except Exception as e:
+        return jsonify({"error": f"İşləmə xətası: {e}"}), 400
+
+    base = _safe_filename(secure_filename(ins.filename).rsplit(".", 1)[0] or "sigorta")
+    fname = f"{base}_qiymetli.xlsx"
+    return send_file(
+        io.BytesIO(data),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=fname,
     )
 
 
@@ -417,7 +788,5 @@ def clear(upload_id):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5050))
     debug = os.environ.get("FLASK_DEBUG", "0") == "1"
-    # Bind on 0.0.0.0 so it works under Render's port forwarding; on local
-    # development this is harmless because the cloud platform isn't listening.
     host = "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1"
     app.run(host=host, port=port, debug=debug)

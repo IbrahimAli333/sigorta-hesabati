@@ -10,121 +10,260 @@
   <main class="container">
     <header class="page-header">
       <h1>Sığorta Hesabatı Generatoru</h1>
-      <p class="muted">Xəstəxana xidmətləri olan Excel faylını yükləyin. Tətbiq sətirləri <strong>Müəssisə</strong> sütununa görə qruplaşdıracaq və hər sığorta üçün yalnız sarı işarələnmiş sütunları ehtiva edən ayrıca hesabat hazırlayacaq.</p>
+      <p class="muted">İki addım: əvvəlcə xəstəxana faylını sığortalara görə bölün, sonra istəyə bağlı olaraq hər hansı sığorta faylına qiymət cədvəlinə əsasən qiymətləri əlavə edin.</p>
     </header>
 
-    <form id="upload-form" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
-      <label for="file-input" id="dropzone" class="dropzone">
-        <div class="dropzone-inner">
-          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="17 8 12 3 7 8"></polyline>
-            <line x1="12" y1="3" x2="12" y2="15"></line>
-          </svg>
-          <p class="dz-title">Excel faylını yükləyin</p>
-          <p class="dz-sub"><code>.xlsx</code> faylını bura sürüşdürün və ya <span class="link">seçmək üçün klikləyin</span></p>
-          <p id="file-name" class="dz-file" hidden></p>
+    <!-- ===================== Step 1 — split ===================== -->
+    <section class="workflow-card">
+      <div class="workflow-head">
+        <span class="step-badge">1</span>
+        <div>
+          <h2>Sığortalara ayır</h2>
+          <p class="muted">Xəstəxana xidmət faylını yükləyin. Tətbiq sətirləri <strong>Müəssisə</strong> sütununa görə qruplaşdıracaq və hər sığorta üçün ayrıca <code>.xlsx</code> fayl hazırlayacaq.</p>
         </div>
-        <input id="file-input" name="file" type="file" accept=".xlsx" required>
-      </label>
-
-      <div class="actions">
-        <button id="submit-btn" type="submit" class="btn primary" disabled>Faylı işlə</button>
       </div>
 
-      <div id="status" class="status" hidden></div>
-    </form>
+      <form id="split-form" action="{{ url_for('upload') }}" method="post" enctype="multipart/form-data">
+        <label for="split-input" id="split-dropzone" class="dropzone">
+          <div class="dropzone-inner">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <p class="dz-title">Xəstəxana Excel faylını yükləyin</p>
+            <p class="dz-sub"><code>.xlsx</code> faylını bura sürüşdürün və ya <span class="link">seçmək üçün klikləyin</span></p>
+            <p id="split-name" class="dz-file" hidden></p>
+          </div>
+          <input id="split-input" name="file" type="file" accept=".xlsx" required>
+        </label>
 
-    <section class="info-cards">
-      <div class="card">
-        <h3>Saxlanılan sütunlar</h3>
+        <div class="actions">
+          <button id="split-btn" type="submit" class="btn primary" disabled>Faylı işlə</button>
+        </div>
+
+        <div id="split-status" class="status" hidden></div>
+      </form>
+
+      <details class="cols-details">
+        <summary>Çıxış faylının sütunları</summary>
         <ul class="cols">
           <li><b>A</b> Xidmət tarixi</li>
           <li><b>D</b> Protokol No</li>
-          <li><b>E</b> Soyadı</li>
-          <li><b>F</b> Adı</li>
-          <li><b>G</b> Baba Adı</li>
-          <li><b>H</b> Tam adi</li>
+          <li class="dim"><b>E</b> Soyadı <span class="muted">— gizli</span></li>
+          <li class="dim"><b>F</b> Adı <span class="muted">— gizli</span></li>
+          <li class="dim"><b>G</b> Baba Adı <span class="muted">— gizli</span></li>
+          <li><b>★</b> Tam adi <span class="muted">— E + F + G birləşdirilir</span></li>
           <li><b>M</b> Doğum Tarixi</li>
           <li><b>AG</b> Xidmət adı</li>
           <li><b>AI</b> Ədəd</li>
           <li><b>AO</b> Kdvli Hasta Tutar</li>
         </ul>
+        <p class="muted card-note">Tarixlər <code>gg.aa.yyyy</code> formatında. Sətirlər <b>Xidmət tarixi</b> üzrə (köhnədən yeniyə) və <b>Adı</b> üzrə (Azərbaycan əlifbası) çeşidlənir. Gizli sütunları Excel-də sağ klik → <em>Unhide</em> ilə açmaq olar.</p>
+      </details>
+    </section>
+
+    <!-- ===================== Step 2 — match prices ===================== -->
+    <section class="workflow-card">
+      <div class="workflow-head">
+        <span class="step-badge">2</span>
+        <div>
+          <h2>Qiymət uyğunlaşdır</h2>
+          <p class="muted">1-ci addımda yaradılan sığorta faylını və qiymət cədvəlini yükləyin. Tətbiq xidmət adlarını 70% oxşarlıq həddi ilə uyğunlaşdırıb iki yeni sütun (<b>Xidmətin adı (sığorta)</b> və <b>Qiymət</b>) əlavə edəcək.</p>
+        </div>
       </div>
-      <div class="card">
-        <h3>Nə əldə edəcəksiniz</h3>
-        <ul>
-          <li>Hər sığorta/müəssisənin sətir sayı ilə siyahısı</li>
-          <li>Hər sığortanın qeydlərinin brauzerdə ön baxışı</li>
-          <li>Hər sığorta üçün ayrıca <code>.xlsx</code> faylının yüklənməsi</li>
-          <li>Bütün sığorta fayllarını bir ZIP arxivində birdən yükləmə</li>
-        </ul>
-      </div>
+
+      <form id="match-form" action="{{ url_for('match') }}" method="post" enctype="multipart/form-data">
+        <div class="dropzone-grid">
+          <label for="ins-input" id="ins-dropzone" class="dropzone">
+            <div class="dropzone-inner">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+              </svg>
+              <p class="dz-title">Sığorta faylı</p>
+              <p class="dz-sub">1-ci addımdan yüklədiyiniz <code>.xlsx</code></p>
+              <p id="ins-name" class="dz-file" hidden></p>
+            </div>
+            <input id="ins-input" name="insurance_file" type="file" accept=".xlsx" required>
+          </label>
+
+          <label for="price-input" id="price-dropzone" class="dropzone">
+            <div class="dropzone-inner">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                <line x1="3" y1="10" x2="21" y2="10"></line>
+                <line x1="9" y1="4" x2="9" y2="20"></line>
+              </svg>
+              <p class="dz-title">Qiymət cədvəli</p>
+              <p class="dz-sub">D = xidmət adı, E = qiymət (4-cü sətir başlıq)</p>
+              <p id="price-name" class="dz-file" hidden></p>
+            </div>
+            <input id="price-input" name="pricelist" type="file" accept=".xlsx" required>
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="match-btn" type="submit" class="btn primary" disabled>Qiymətləri əlavə et və yüklə</button>
+        </div>
+
+        <div id="match-status" class="status" hidden></div>
+      </form>
     </section>
   </main>
 
   <script>
-    const dz = document.getElementById('dropzone');
-    const input = document.getElementById('file-input');
-    const fileName = document.getElementById('file-name');
-    const submitBtn = document.getElementById('submit-btn');
-    const status = document.getElementById('status');
-    const form = document.getElementById('upload-form');
+    function fmtSize(bytes) { return (bytes / 1024 / 1024).toFixed(2) + ' MB'; }
 
-    function setFile(file) {
-      if (!file) return;
-      if (!file.name.toLowerCase().endsWith('.xlsx')) {
-        status.hidden = false;
-        status.className = 'status error';
-        status.textContent = 'Zəhmət olmasa .xlsx faylı seçin.';
-        return;
+    /* --- generic dropzone wiring --- */
+    function setupDropzone({ zoneId, inputId, nameId, onFile }) {
+      const zone = document.getElementById(zoneId);
+      const input = document.getElementById(inputId);
+      const nameEl = document.getElementById(nameId);
+      function setFile(file) {
+        if (!file) return;
+        if (!file.name.toLowerCase().endsWith('.xlsx')) {
+          onFile(null, 'Zəhmət olmasa .xlsx faylı seçin.');
+          return;
+        }
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        nameEl.hidden = false;
+        nameEl.textContent = file.name + ' (' + fmtSize(file.size) + ')';
+        onFile(file, null);
       }
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      input.files = dt.files;
-      fileName.hidden = false;
-      fileName.textContent = file.name + ' (' + (file.size / 1024 / 1024).toFixed(2) + ' MB)';
-      submitBtn.disabled = false;
-      status.hidden = true;
+      input.addEventListener('change', e => setFile(e.target.files[0]));
+      ['dragenter', 'dragover'].forEach(ev =>
+        zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.add('drag'); })
+      );
+      ['dragleave', 'drop'].forEach(ev =>
+        zone.addEventListener(ev, e => { e.preventDefault(); zone.classList.remove('drag'); })
+      );
+      zone.addEventListener('drop', e => setFile(e.dataTransfer.files[0]));
     }
 
-    input.addEventListener('change', (e) => setFile(e.target.files[0]));
+    /* --- Step 1: split --- */
+    const splitForm = document.getElementById('split-form');
+    const splitBtn = document.getElementById('split-btn');
+    const splitStatus = document.getElementById('split-status');
+    const splitInput = document.getElementById('split-input');
 
-    ['dragenter', 'dragover'].forEach(ev => {
-      dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('drag'); });
-    });
-    ['dragleave', 'drop'].forEach(ev => {
-      dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('drag'); });
-    });
-    dz.addEventListener('drop', (e) => {
-      const file = e.dataTransfer.files[0];
-      setFile(file);
+    setupDropzone({
+      zoneId: 'split-dropzone', inputId: 'split-input', nameId: 'split-name',
+      onFile: (file, err) => {
+        if (err) {
+          splitStatus.hidden = false;
+          splitStatus.className = 'status error';
+          splitStatus.textContent = err;
+          splitBtn.disabled = true;
+        } else {
+          splitStatus.hidden = true;
+          splitBtn.disabled = !file;
+        }
+      },
     });
 
-    form.addEventListener('submit', (e) => {
-      if (!input.files.length) { e.preventDefault(); return; }
+    splitForm.addEventListener('submit', e => {
+      if (!splitInput.files.length) { e.preventDefault(); return; }
       e.preventDefault();
-      submitBtn.disabled = true;
-      submitBtn.textContent = 'İşlənir…';
-      status.hidden = false;
-      status.className = 'status info';
-      status.textContent = 'Yüklənir və işlənir — böyük fayllar üçün bir az vaxt ala bilər.';
+      splitBtn.disabled = true;
+      splitBtn.textContent = 'İşlənir…';
+      splitStatus.hidden = false;
+      splitStatus.className = 'status info';
+      splitStatus.textContent = 'Yüklənir və işlənir — böyük fayllar üçün bir az vaxt ala bilər.';
 
-      const fd = new FormData(form);
-      fetch(form.action, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'fetch' } })
-        .then(async (r) => {
+      const fd = new FormData(splitForm);
+      fetch(splitForm.action, { method: 'POST', body: fd, headers: { 'X-Requested-With': 'fetch' } })
+        .then(async r => {
           if (!r.ok) {
             const data = await r.json().catch(() => ({ error: 'Yükləmə uğursuz oldu' }));
             throw new Error(data.error || ('HTTP ' + r.status));
           }
           return r.json();
         })
-        .then((data) => { window.location.href = data.redirect; })
-        .catch((err) => {
-          status.className = 'status error';
-          status.textContent = err.message;
-          submitBtn.disabled = false;
-          submitBtn.textContent = 'Faylı işlə';
+        .then(data => { window.location.href = data.redirect; })
+        .catch(err => {
+          splitStatus.className = 'status error';
+          splitStatus.textContent = err.message;
+          splitBtn.disabled = false;
+          splitBtn.textContent = 'Faylı işlə';
+        });
+    });
+
+    /* --- Step 2: match --- */
+    const matchForm = document.getElementById('match-form');
+    const matchBtn = document.getElementById('match-btn');
+    const matchStatus = document.getElementById('match-status');
+    const insInput = document.getElementById('ins-input');
+    const priceInput = document.getElementById('price-input');
+
+    function updateMatchBtn() {
+      matchBtn.disabled = !(insInput.files.length && priceInput.files.length);
+    }
+
+    setupDropzone({
+      zoneId: 'ins-dropzone', inputId: 'ins-input', nameId: 'ins-name',
+      onFile: (file, err) => {
+        if (err) {
+          matchStatus.hidden = false;
+          matchStatus.className = 'status error';
+          matchStatus.textContent = err;
+        } else {
+          matchStatus.hidden = true;
+        }
+        updateMatchBtn();
+      },
+    });
+    setupDropzone({
+      zoneId: 'price-dropzone', inputId: 'price-input', nameId: 'price-name',
+      onFile: (file, err) => {
+        if (err) {
+          matchStatus.hidden = false;
+          matchStatus.className = 'status error';
+          matchStatus.textContent = err;
+        } else {
+          matchStatus.hidden = true;
+        }
+        updateMatchBtn();
+      },
+    });
+
+    matchForm.addEventListener('submit', e => {
+      if (!insInput.files.length || !priceInput.files.length) { e.preventDefault(); return; }
+      e.preventDefault();
+      matchBtn.disabled = true;
+      matchBtn.textContent = 'İşlənir…';
+      matchStatus.hidden = false;
+      matchStatus.className = 'status info';
+      matchStatus.textContent = 'Xidmət adları uyğunlaşdırılır — bir neçə saniyə çəkə bilər.';
+
+      const fd = new FormData(matchForm);
+      fetch(matchForm.action, { method: 'POST', body: fd })
+        .then(async r => {
+          if (!r.ok) {
+            const data = await r.json().catch(() => ({ error: 'Uyğunlaşdırma uğursuz oldu' }));
+            throw new Error(data.error || ('HTTP ' + r.status));
+          }
+          const disp = r.headers.get('content-disposition') || '';
+          const m = disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+          const fname = m ? decodeURIComponent(m[1]) : 'qiymetli.xlsx';
+          const blob = await r.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = fname;
+          document.body.appendChild(a); a.click();
+          a.remove(); URL.revokeObjectURL(url);
+          matchStatus.className = 'status success';
+          matchStatus.textContent = 'Hazırdır — fayl yükləndi: ' + fname;
+        })
+        .catch(err => {
+          matchStatus.className = 'status error';
+          matchStatus.textContent = err.message;
+        })
+        .finally(() => {
+          matchBtn.disabled = false;
+          matchBtn.textContent = 'Qiymətləri əlavə et və yüklə';
         });
     });
   </script>
