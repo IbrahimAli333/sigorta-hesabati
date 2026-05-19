@@ -13,3 +13,8 @@ uploads/
 .DS_Store
 .idea/
 .vscode/
+
+# PyInstaller build output (don't commit binaries — ~50 MB each)
+build/
+dist/
+*.pyz
