@@ -25,16 +25,11 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller sigorta.spec --clean --noconfirm
 
-      - name: Zip the result
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "dist/Sigorta Hesabati/*" -DestinationPath "Sigorta-Hesabati-Windows.zip"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Sigorta-Hesabati-Windows
-          path: Sigorta-Hesabati-Windows.zip
+          path: dist/Sigorta Hesabati/
           if-no-files-found: error
           retention-days: 30
 

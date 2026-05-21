@@ -56,42 +56,33 @@ def _require_password():
 
 # ----------------------- Column configuration -----------------------
 #
-# We read more columns from the source than we emit. E (Soyadı), F (Adı) and
-# G (Baba Adı) are read so we can build "Tam adi" ourselves and so we can sort
-# by Adı; they do NOT appear in the output.
+# Columns are located in the source file by HEADER NAME, not by fixed position.
+# This makes the app robust to files where columns have been inserted, removed,
+# or reordered. Each header is normalized (strip + collapse whitespace +
+# casefold) before lookup, so minor formatting differences don't break things.
 #
-# Source column positions (0-indexed):
-GROUP_COL_IDX = 13   # N  Müəssisə (grouping key)
+# We read these source columns: Soyadı, Adı, Baba Adı are used as inputs for
+# the computed Tam adi (and Adı is used as a sort key); they're kept in the
+# output but marked HIDDEN. Tam adi is computed by us — we never trust a
+# pre-existing "Tam adi" column in the source.
 
-READ_COL_POSITIONS = [
-    0,   # A  Xidmət tarixi      (output, sort key)
-    3,   # D  Protokol No        (output)
-    4,   # E  Soyadı             (input only — for computed Tam adi)
-    5,   # F  Adı                (input only — for computed Tam adi + sort)
-    6,   # G  Baba Adı           (input only — for computed Tam adi)
-    12,  # M  Doğum Tarixi       (output)
-    GROUP_COL_IDX,
-    32,  # AG Xidmət adı         (output)
-    34,  # AI Ədəd               (output)
-    40,  # AO Kdvli Hasta Tutar  (output)
-]
-READ_COL_POSITIONS = sorted(set(READ_COL_POSITIONS))
+# normalized-header  ->  internal role name
+TARGET_HEADERS: dict[str, str] = {
+    "xidmət tarixi":    "date_service",
+    "protokol no":      "protocol",
+    "soyadı":           "soyadi",
+    "adı":              "adi",
+    "baba adı":         "baba",
+    "doğum tarixi":     "dob",
+    "müəssisə":         "group",
+    "xidmət adı":       "service",
+    "ədəd":             "qty",
+    "kdvli hasta tutar": "amount",
+}
+REQUIRED_ROLES = list(TARGET_HEADERS.values())
+ROLE_TO_LABEL = {role: label for label, role in TARGET_HEADERS.items()}
 
-# Source positions that appear in the output, in display order.
-# E (4), F (5), G (6) are emitted but marked HIDDEN in Excel — users can right-click
-# and "Unhide" if they want to inspect the source components of Tam adi.
-OUTPUT_SOURCE_POSITIONS = [0, 3, 4, 5, 6, 12, 32, 34, 40]
-HIDDEN_SOURCE_POSITIONS = {4, 5, 6}
-
-# Computed "Tam adi" column. Inserted in the output right after Baba Adı (6)
-# so the hidden source components sit immediately to its left.
-TAM_ADI_LABEL = "Tam adi"
-TAM_ADI_INSERT_AFTER = 6
-
-# Type classification by source position.
-DATE_COL_POSITIONS = {0, 12}     # Xidmət tarixi, Doğum Tarixi
-MONEY_COL_POSITIONS = {40}        # Kdvli Hasta Tutar
-QTY_COL_POSITIONS = {34}          # Ədəd
+TAM_ADI_LABEL = "Tam adi"  # computed column
 
 UNKNOWN_LABEL = "Bilinmir"  # used when Müəssisə is empty/NaN
 
@@ -139,6 +130,17 @@ def _az_sort_key(s: str) -> str:
             rank = 100 + (ord(ch) & 0x3FF)
         parts.append(f"{rank:04x}")
     return "".join(parts)
+
+
+# ----------------------- Header normalization -----------------------
+
+
+def _norm_header(h) -> str:
+    """Casefold + collapse whitespace so 'Xidmət  adı', ' xidmət adı ' etc. all
+    normalize to 'xidmət adı'."""
+    if h is None:
+        return ""
+    return re.sub(r"\s+", " ", str(h)).strip().casefold()
 
 
 # ----------------------- Storage -----------------------
@@ -295,12 +297,6 @@ _MONEY_HEADER_NAMES = {"kdvli hasta tutar", "qiymət"}
 _QTY_HEADER_NAMES = {"ədəd"}
 
 
-def _norm_header(h) -> str:
-    if h is None:
-        return ""
-    return re.sub(r"\s+", " ", str(h)).strip().casefold()
-
-
 def _match_existing_file(insurance_storage, pricelist_storage) -> tuple[bytes, str]:
     """Take an already-split insurance .xlsx + a price list, return new .xlsx
     bytes (and a suggested download name) with two new columns appended:
@@ -353,24 +349,49 @@ def _match_existing_file(insurance_storage, pricelist_storage) -> tuple[bytes, s
 # ----------------------- Core: read, sort, group -----------------------
 
 
+def _locate_columns(df) -> dict[str, str]:
+    """Map each TARGET_HEADERS role to the actual column name found in df.
+
+    Raises ValueError listing the missing headers (in human-readable form) if
+    any required column can't be found.
+    """
+    found: dict[str, str] = {}
+    for col in df.columns:
+        n = _norm_header(col)
+        if n in TARGET_HEADERS:
+            role = TARGET_HEADERS[n]
+            # First match wins (in case of duplicate headers).
+            found.setdefault(role, col)
+    missing = [role for role in REQUIRED_ROLES if role not in found]
+    if missing:
+        missing_labels = [ROLE_TO_LABEL[r] for r in missing]
+        raise ValueError(
+            "Tələb olunan sütun(lar) tapılmadı: "
+            + ", ".join(repr(lbl) for lbl in missing_labels)
+            + ". Excel faylındakı sütun başlıqlarını yoxlayın."
+        )
+    return found
+
+
 def _read_and_group(
     file_storage,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, str], set[str]]:
     """Read the uploaded xlsx, sort, group by Müəssisə.
 
-    Returns (groups, col_types, hidden_cols). Output columns include the source
-    Soyadı/Adı/Baba Adı (hidden in Excel) plus a computed visible "Tam adi".
-    Price-list matching is a separate flow — see /match.
+    Columns are located by HEADER NAME (not by fixed position) so files with
+    inserted/removed columns still work. Output keeps the source Soyadı/Adı/
+    Baba Adı (hidden in Excel) plus a computed visible "Tam adi". Price-list
+    matching is a separate flow — see /match.
     """
-    df = pd.read_excel(file_storage, usecols=READ_COL_POSITIONS, engine="openpyxl")
+    df = pd.read_excel(file_storage, engine="openpyxl")
+    cols = _locate_columns(df)
 
-    pos_to_name: dict[int, str] = {idx: df.columns[i] for i, idx in enumerate(READ_COL_POSITIONS)}
-    date_col = pos_to_name[0]
-    dob_col = pos_to_name[12]
-    soyadi_col = pos_to_name[4]
-    adi_col = pos_to_name[5]
-    baba_col = pos_to_name[6]
-    group_col = pos_to_name[GROUP_COL_IDX]
+    date_col = cols["date_service"]
+    dob_col = cols["dob"]
+    soyadi_col = cols["soyadi"]
+    adi_col = cols["adi"]
+    baba_col = cols["baba"]
+    group_col = cols["group"]
 
     # Build computed Tam adi = Soyadı + Adı + Baba Adı (vectorized).
     df[TAM_ADI_LABEL] = (
@@ -394,30 +415,34 @@ def _read_and_group(
     ).reset_index(drop=True)
     df = df.drop(columns=["_az_sort_key"])
 
-    # Build output column list in display order. E/F/G appear right before Tam adi.
-    output_cols: list[str] = []
-    hidden_cols: set[str] = set()
-    for pos in OUTPUT_SOURCE_POSITIONS:
-        name = pos_to_name[pos]
-        output_cols.append(name)
-        if pos in HIDDEN_SOURCE_POSITIONS:
-            hidden_cols.add(name)
-        if pos == TAM_ADI_INSERT_AFTER:
-            output_cols.append(TAM_ADI_LABEL)
+    # Output column order: A, D, E (hidden), F (hidden), G (hidden), Tam adi,
+    # Doğum Tarixi, Xidmət adı, Ədəd, Kdvli Hasta Tutar.
+    output_cols = [
+        date_col,
+        cols["protocol"],
+        soyadi_col,
+        adi_col,
+        baba_col,
+        TAM_ADI_LABEL,
+        dob_col,
+        cols["service"],
+        cols["qty"],
+        cols["amount"],
+    ]
+    hidden_cols = {soyadi_col, adi_col, baba_col}
 
-    # Type classification keyed by the actual header name in the source.
-    col_types: dict[str, str] = {}
-    for pos in OUTPUT_SOURCE_POSITIONS:
-        name = pos_to_name[pos]
-        if pos in DATE_COL_POSITIONS:
-            col_types[name] = "date"
-        elif pos in MONEY_COL_POSITIONS:
-            col_types[name] = "money"
-        elif pos in QTY_COL_POSITIONS:
-            col_types[name] = "qty"
-        else:
-            col_types[name] = "text"
-    col_types[TAM_ADI_LABEL] = "text"
+    col_types: dict[str, str] = {
+        date_col: "date",
+        cols["protocol"]: "text",
+        soyadi_col: "text",
+        adi_col: "text",
+        baba_col: "text",
+        TAM_ADI_LABEL: "text",
+        dob_col: "date",
+        cols["service"]: "text",
+        cols["qty"]: "qty",
+        cols["amount"]: "money",
+    }
 
     # Group by Müəssisə.
     groups: dict[str, pd.DataFrame] = {}
